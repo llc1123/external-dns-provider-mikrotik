@@ -236,66 +236,71 @@ func TestGetSystemInfo(t *testing.T) {
 	}
 }
 
-func TestGetAllDNSRecords(t *testing.T) {
+func TestGetDNSRecordsByName(t *testing.T) {
 	testDefaultComment := "external-dns"
 
 	testCases := []struct {
-		name                  string
-		records               []DNSRecord
-		expectError           bool
-		unauthorized          bool
-		expectedFilteredCount int // Expected number after filtering
+		name          string
+		targetName    string
+		records       []DNSRecord
+		expectedCount int
+		expectError   bool
+		expectedQuery string
 	}{
 		{
-			name: "Multiple DNS records",
+			name:       "Filter by specific name",
+			targetName: "example.com",
 			records: []DNSRecord{
 				{
 					ID:      "*1",
-					Address: "192.168.88.1",
-					Comment: "defconf", // This will be filtered out
-					Name:    "router.lan",
-					TTL:     "1d",
-					Type:    "A",
-				},
-				{
-					ID:      "*3",
 					Address: "1.2.3.4",
-					Comment: testDefaultComment, // This will be included
+					Comment: testDefaultComment,
 					Name:    "example.com",
-					TTL:     "1d",
+					TTL:     "1h",
 					Type:    "A",
 				},
 				{
-					ID:      "*4",
+					ID:      "*2",
 					CName:   "example.com",
-					Comment: testDefaultComment, // This will be included
-					Name:    "subdomain.example.com",
-					TTL:     "1d",
+					Comment: testDefaultComment,
+					Name:    "www.example.com",
+					TTL:     "1h",
 					Type:    "CNAME",
 				},
-				{
-					ID:      "*5",
-					Address: "::1",
-					Comment: "manual", // This will be filtered out
-					Name:    "test quad-A",
-					TTL:     "1d",
-					Type:    "AAAA",
-				},
-				{
-					ID:      "*6",
-					Comment: testDefaultComment, // This will be included
-					Name:    "example.com",
-					Text:    "lorem ipsum",
-					TTL:     "1d",
-					Type:    "TXT",
-				},
 			},
-			expectedFilteredCount: 3, // Only 3 records have the correct comment
+			expectedCount: 1, // Only records with exact name match
+			expectedQuery: "ip/dns/static?type=A,AAAA,CNAME,TXT,MX,SRV,NS&comment=external-dns&name=example.com",
 		},
 		{
-			name:                  "No DNS records",
-			records:               []DNSRecord{},
-			expectedFilteredCount: 0,
+			name:       "Get all managed records (empty name)",
+			targetName: "",
+			records: []DNSRecord{
+				{
+					ID:      "*1",
+					Address: "1.2.3.4",
+					Comment: testDefaultComment,
+					Name:    "example.com",
+					TTL:     "1h",
+					Type:    "A",
+				},
+				{
+					ID:      "*2",
+					Address: "5.6.7.8",
+					Comment: testDefaultComment,
+					Name:    "test.com",
+					TTL:     "1h",
+					Type:    "A",
+				},
+			},
+			expectedCount: 2, // All managed records
+			expectedQuery: "ip/dns/static?type=A,AAAA,CNAME,TXT,MX,SRV,NS&comment=external-dns",
+		},
+		{
+			name:          "No matching records",
+			targetName:    "nonexistent.com",
+			records:       []DNSRecord{},
+			expectedCount: 0,
+			expectedQuery: "ip/dns/static?type=A,AAAA,CNAME,TXT,MX,SRV,NS&comment=external-dns&name=nonexistent.com",
 		},
 	}
 
@@ -304,27 +309,45 @@ func TestGetAllDNSRecords(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// Basic Auth validation
 				username, password, ok := r.BasicAuth()
-				if !ok || username != mockUsername || password != mockPassword || tc.unauthorized {
+				if !ok || username != mockUsername || password != mockPassword {
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
 
-				// Handle GET requests to /rest/ip/dns/static
-				if r.Method == http.MethodGet && r.URL.Path == "/rest/ip/dns/static" {
-					w.Header().Set("Content-Type", "application/json")
-					if err := json.NewEncoder(w).Encode(tc.records); err != nil {
-						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-						return
-					}
-					return
+				// Verify the query path matches expected
+				if r.URL.Path != "/rest/ip/dns/static" {
+					t.Errorf("Expected path '/rest/ip/dns/static', got '%s'", r.URL.Path)
 				}
 
-				// Return 404 for any other path
-				http.NotFound(w, r)
+				// Check query parameters
+				if tc.targetName != "" {
+					nameParam := r.URL.Query().Get("name")
+					if nameParam != tc.targetName {
+						t.Errorf("Expected name parameter '%s', got '%s'", tc.targetName, nameParam)
+					}
+				}
+
+				commentParam := r.URL.Query().Get("comment")
+				if commentParam != testDefaultComment {
+					t.Errorf("Expected comment parameter '%s', got '%s'", testDefaultComment, commentParam)
+				}
+
+				// Return filtered records based on query
+				var filteredRecords []DNSRecord
+				for _, record := range tc.records {
+					if tc.targetName == "" || record.Name == tc.targetName {
+						filteredRecords = append(filteredRecords, record)
+					}
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(filteredRecords); err != nil {
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
 			}))
 			defer server.Close()
 
-			// Set up the client
 			config := &MikrotikConnectionConfig{
 				BaseUrl:       server.URL,
 				Username:      mockUsername,
@@ -332,13 +355,14 @@ func TestGetAllDNSRecords(t *testing.T) {
 				SkipTLSVerify: true,
 			}
 			defaults := &MikrotikDefaults{
-				DefaultComment: testDefaultComment, // Use the test default comment
+				DefaultComment: testDefaultComment,
 			}
 			client, err := NewMikrotikClient(config, defaults)
 			if err != nil {
 				t.Fatalf("Failed to create client: %v", err)
 			}
-			records, err := client.GetAllDNSRecords()
+
+			records, err := client.GetDNSRecordsByName(tc.targetName)
 
 			if tc.expectError {
 				if err == nil {
@@ -349,56 +373,14 @@ func TestGetAllDNSRecords(t *testing.T) {
 					t.Fatalf("Expected no error, got %v", err)
 				}
 
-				// Verify the number of records matches expected filtered count
-				if len(records) != tc.expectedFilteredCount {
-					t.Fatalf("Expected %d records, got %d", tc.expectedFilteredCount, len(records))
+				if len(records) != tc.expectedCount {
+					t.Errorf("Expected %d records, got %d", tc.expectedCount, len(records))
 				}
 
 				// Verify all returned records have the correct comment
 				for _, record := range records {
 					if record.Comment != testDefaultComment {
 						t.Errorf("Record %s should have comment '%s', got '%s'", record.Name, testDefaultComment, record.Comment)
-					}
-				}
-
-				// Compare records if there are any
-				if len(records) > 0 {
-					expectedRecordsMap := make(map[string]DNSRecord)
-					for _, rec := range tc.records {
-						// Only include records that should pass the filter
-						if rec.Comment == testDefaultComment {
-							key := rec.Name + "|" + rec.Type
-							expectedRecordsMap[key] = rec
-						}
-					}
-
-					for _, record := range records {
-						key := record.Name + "|" + record.Type
-						expectedRecord, exists := expectedRecordsMap[key]
-						if !exists {
-							t.Errorf("Unexpected record found: %v", record)
-							continue
-						}
-						// Compare fields
-						if record.ID != expectedRecord.ID {
-							t.Errorf("Expected ID '%s', got '%s' for record %s", expectedRecord.ID, record.ID, key)
-						}
-						switch record.Type {
-						case "A", "AAAA":
-							if record.Address != expectedRecord.Address {
-								t.Errorf("Expected Address '%s', got '%s' for record %s", expectedRecord.Address, record.Address, key)
-							}
-						case "CNAME":
-							if record.CName != expectedRecord.CName {
-								t.Errorf("Expected CName '%s', got '%s' for record %s", expectedRecord.CName, record.CName, key)
-							}
-						case "TXT":
-							if record.Text != expectedRecord.Text {
-								t.Errorf("Expected Text '%s', got '%s' for record %s", expectedRecord.Text, record.Text, key)
-							}
-						default:
-							t.Errorf("Unsupported RecordType '%s' for record %s", record.Type, key)
-						}
 					}
 				}
 			}
@@ -697,7 +679,7 @@ func TestDeleteDNSRecords(t *testing.T) {
 					return
 				}
 
-				// Handle GET requests to /rest/ip/dns/static (for GetAllDNSRecords)
+				// Handle GET requests to /rest/ip/dns/static (for GetDNSRecordsByName)
 				if r.Method == http.MethodGet && r.URL.Path == "/rest/ip/dns/static" {
 					w.Header().Set("Content-Type", "application/json")
 					if err := json.NewEncoder(w).Encode(tc.existingRecords); err != nil {
@@ -1091,7 +1073,7 @@ func TestDoRequest(t *testing.T) {
 				bodyReader = bytes.NewReader([]byte(tc.body))
 			}
 
-			resp, err := client.doRequest(tc.method, tc.path, bodyReader)
+			resp, err := client.doRequest(tc.method, tc.path, nil, bodyReader)
 
 			if tc.expectError {
 				if err == nil {

@@ -46,7 +46,8 @@ func NewMikrotikProvider(domainFilter *endpoint.DomainFilter, defaults *Mikrotik
 
 // Records returns the list of all DNS records.
 func (p *MikrotikProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {
-	records, err := p.client.GetAllDNSRecords()
+	// Get all managed records (no name filter)
+	records, err := p.client.GetDNSRecordsByName("")
 	if err != nil {
 		return nil, err
 	}
@@ -125,17 +126,16 @@ func (p *MikrotikProvider) ApplyChanges(ctx context.Context, changes *plan.Chang
 func (p *MikrotikProvider) smartUpdateEndpoint(oldEndpoint, newEndpoint *endpoint.Endpoint) error {
 	log.Debugf("Smart update: comparing old endpoint %s with new endpoint", oldEndpoint.DNSName)
 
-	// Get current records for this endpoint
-	allRecords, err := p.client.GetAllDNSRecords()
+	// Get current records for this endpoint using name filtering
+	allRecords, err := p.client.GetDNSRecordsByName(oldEndpoint.DNSName)
 	if err != nil {
 		return fmt.Errorf("failed to get current DNS records: %w", err)
 	}
 
-	// Find current records for this endpoint (name+type match + default comment)
+	// Filter records by type (records are already filtered by name and comment)
 	var currentRecords []DNSRecord
 	for _, record := range allRecords {
-		if record.Name == oldEndpoint.DNSName && record.Type == oldEndpoint.RecordType &&
-			record.Comment == p.client.DefaultComment {
+		if record.Type == oldEndpoint.RecordType {
 			currentRecords = append(currentRecords, record)
 		}
 	}

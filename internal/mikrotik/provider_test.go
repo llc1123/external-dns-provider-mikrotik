@@ -1040,7 +1040,7 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 
 				// Mock DNS records for GET requests (needed for delete and update)
 				if r.URL.Path == "/rest/ip/dns/static" && r.Method == http.MethodGet {
-					mockRecords := []DNSRecord{
+					allRecords := []DNSRecord{
 						{
 							ID:      "*1",
 							Name:    "delete.example.com",
@@ -1105,6 +1105,25 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 							Comment: "old",
 						},
 					}
+
+					// Filter records based on query parameters
+					query := r.URL.Query()
+					nameFilter := query.Get("name")
+					commentFilter := query.Get("comment")
+
+					var mockRecords []DNSRecord
+					for _, record := range allRecords {
+						// Apply name filter if specified
+						if nameFilter != "" && record.Name != nameFilter {
+							continue
+						}
+						// Apply comment filter if specified
+						if commentFilter != "" && record.Comment != commentFilter {
+							continue
+						}
+						mockRecords = append(mockRecords, record)
+					}
+
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(mockRecords)
 					return

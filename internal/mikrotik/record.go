@@ -594,7 +594,7 @@ func parseSRV(data string) (string, string, string, string, error) {
 }
 
 // AggregateRecordsToEndpoints groups DNS records by name+type and converts them to ExternalDNS endpoints
-// All provided records are assumed to be managed by external-dns (already filtered by GetAllDNSRecords)
+// All provided records are assumed to be managed by external-dns (already filtered by GetDNSRecordsByName)
 func AggregateRecordsToEndpoints(records []DNSRecord, defaultComment string) ([]*endpoint.Endpoint, error) {
 	log.Debugf("Aggregating %d DNS records to endpoints", len(records))
 
@@ -603,7 +603,7 @@ func AggregateRecordsToEndpoints(records []DNSRecord, defaultComment string) ([]
 	for i := range records {
 		record := &records[i]
 
-		// All records should already have the correct comment (filtered by GetAllDNSRecords)
+		// All records should already have the correct comment (filtered by GetDNSRecordsByName)
 		// But we'll add a debug log for verification
 		if record.Comment != defaultComment {
 			log.Warnf("Record %s (ID: %s) has unexpected comment '%s', expected '%s'. This should not happen.",
