@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strings"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -101,7 +102,7 @@ func (c *MikrotikApiClient) doRequest(method, path string, queryParams url.Value
 
 	// Add query parameters if provided
 	if len(queryParams) > 0 {
-		baseURL += "?" + queryParams.Encode()
+		baseURL += "?" + c.encodeQueryParams(queryParams)
 	}
 
 	log.Debugf("sending %s request to: %s", method, baseURL)
@@ -151,6 +152,28 @@ func (c *MikrotikApiClient) GetSystemInfo() (*MikrotikSystemInfo, error) {
 	log.Debugf("got system info: %+v", info)
 
 	return &info, nil
+}
+
+// encodeQueryParams custom encodes query parameters for MikroTik API
+// Special handling: type parameter commas should not be URL-encoded
+func (c *MikrotikApiClient) encodeQueryParams(params url.Values) string {
+	if len(params) == 0 {
+		return ""
+	}
+
+	var parts []string
+	for key, values := range params {
+		for _, value := range values {
+			if key == "type" {
+				// For type parameter, don't encode commas
+				parts = append(parts, fmt.Sprintf("%s=%s", url.QueryEscape(key), value))
+			} else {
+				// For other parameters, use standard encoding
+				parts = append(parts, fmt.Sprintf("%s=%s", url.QueryEscape(key), url.QueryEscape(value)))
+			}
+		}
+	}
+	return strings.Join(parts, "&")
 }
 
 // GetDNSRecordsByName fetches DNS records filtered by name and comment from the MikroTik API
