@@ -424,8 +424,16 @@ func getRecordTarget(record *DNSRecord) string {
 	case "TXT":
 		return record.Text
 	case "MX":
+		// MX records need to include priority for proper matching
+		if record.MXPreference != "" && record.MXExchange != "" {
+			return record.MXPreference + " " + record.MXExchange
+		}
 		return record.MXExchange
 	case "SRV":
+		// SRV records need to include priority, weight, port for proper matching
+		if record.SrvPriority != "" && record.SrvWeight != "" && record.SrvPort != "" && record.SrvTarget != "" {
+			return record.SrvPriority + " " + record.SrvWeight + " " + record.SrvPort + " " + record.SrvTarget
+		}
 		return record.SrvTarget
 	case "NS":
 		return record.NS
