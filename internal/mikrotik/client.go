@@ -348,10 +348,10 @@ func (c *MikrotikApiClient) CreateDNSRecords(ep *endpoint.Endpoint) ([]*DNSRecor
 
 		createdRecord, err := c.createSingleDNSRecord(record)
 		if err != nil {
-			// If we've partially created records, we should clean up
-			// For now, we'll just log the error and continue
-			log.Errorf("failed to create DNS record %d: %v", i+1, err)
-			return createdRecords, fmt.Errorf("failed to create record %d: %w", i+1, err)
+			// Ignore the error and continue with the next record
+			// This will be handled in the next webhook synchronization
+			log.Errorf("failed to create DNS record %d: %v, continuing with next record", i+1, err)
+			continue
 		}
 
 		createdRecords = append(createdRecords, createdRecord)
