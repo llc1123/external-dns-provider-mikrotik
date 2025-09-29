@@ -859,7 +859,7 @@ func TestExternalDNSEndpointToDNSRecord(t *testing.T) {
 				Type:    "A",
 				Address: "192.0.2.1",
 				TTL:     "1h",
-				Comment: "", // 不再包含GroupKey
+				Comment: "",
 			},
 			expectError: false,
 		},

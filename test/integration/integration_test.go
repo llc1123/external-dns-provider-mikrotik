@@ -24,7 +24,6 @@ const (
 	mockPassword    = "testpass"
 	defaultComment  = "external-dns"
 	contentTypeJSON = "application/external.dns.webhook+json;version=1"
-	contentTypeText = "text/plain"
 )
 
 // RequestCapture captures HTTP requests for verification
@@ -403,43 +402,4 @@ func (s *IntegrationTestSuite) assertRequestCaptured(method, path string, queryP
 		}
 	}
 	s.t.Errorf("Expected request not found: %s %s with params %v", method, path, queryParams)
-}
-
-// assertJSONBodyContains verifies that request body contains expected JSON data
-func (s *IntegrationTestSuite) assertJSONBodyContains(expectedData interface{}) {
-	requests := s.mockServer.GetRequests()
-	if len(requests) == 0 {
-		s.t.Error("No requests captured")
-		return
-	}
-
-	lastRequest := requests[len(requests)-1]
-	if len(lastRequest.Body) == 0 {
-		s.t.Error("Request body is empty")
-		return
-	}
-
-	expectedBytes, err := json.Marshal(expectedData)
-	if err != nil {
-		s.t.Errorf("Failed to marshal expected data: %v", err)
-		return
-	}
-
-	var expected, actual interface{}
-	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
-		s.t.Errorf("Failed to unmarshal expected data: %v", err)
-		return
-	}
-
-	if err := json.Unmarshal(lastRequest.Body, &actual); err != nil {
-		s.t.Errorf("Failed to unmarshal request body: %v", err)
-		return
-	}
-
-	expectedJSON, _ := json.Marshal(expected)
-	actualJSON, _ := json.Marshal(actual)
-
-	if string(expectedJSON) != string(actualJSON) {
-		s.t.Errorf("Request body mismatch.\nExpected: %s\nActual: %s", expectedJSON, actualJSON)
-	}
 }
