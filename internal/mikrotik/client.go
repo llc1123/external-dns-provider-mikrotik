@@ -12,7 +12,6 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"strings"
-	"sync"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/publicsuffix"
@@ -37,7 +36,6 @@ type MikrotikApiClient struct {
 	*MikrotikDefaults
 	*MikrotikConnectionConfig
 	*http.Client
-	deleteMutex sync.Mutex // Global lock to prevent concurrent delete operations
 }
 
 // MikrotikSystemInfo represents MikroTik system information
@@ -213,11 +211,9 @@ func (c *MikrotikApiClient) GetDNSRecordsByName(name string) ([]DNSRecord, error
 }
 
 // DeleteDNSRecords deletes all DNS records associated with an endpoint
+// Since MikroTik API record IDs are fixed and don't change during deletions,
+// we can directly use the IDs from the initial query without re-verification
 func (c *MikrotikApiClient) DeleteDNSRecords(endpoint *endpoint.Endpoint) error {
-	// Use global lock to prevent concurrent delete operations
-	c.deleteMutex.Lock()
-	defer c.deleteMutex.Unlock()
-
 	log.Infof("deleting DNS records for endpoint: %+v", endpoint)
 
 	// Find records that match this endpoint using server-side filtering for better performance
@@ -269,84 +265,23 @@ func (c *MikrotikApiClient) DeleteDNSRecords(endpoint *endpoint.Endpoint) error 
 		return nil
 	}
 
-	// Delete records one by one with re-verification for each deletion
-	// This is necessary because MikroTik reorders IDs after each deletion
+	// Delete records directly using their fixed IDs from the initial query
+	// MikroTik API record IDs are stable and don't change during deletions
 	for i, record := range recordsToDelete {
-		log.Debugf("deleting DNS record %d/%d: %s", i+1, len(recordsToDelete), record.ID)
+		log.Debugf("deleting DNS record %d/%d: %s (ID: %s)", i+1, len(recordsToDelete), record.Name, record.ID)
 
-		// Before each deletion, re-fetch current records to get updated IDs
-		// This is important because previous deletions may have changed the ID numbering
-		if i > 0 {
-			log.Debugf("re-fetching records to get updated IDs after previous deletions")
-			currentRecords, err := c.GetDNSRecordsByName(endpoint.DNSName)
-			if err != nil {
-				log.Errorf("failed to re-fetch DNS records during deletion: %v", err)
-				return fmt.Errorf("failed to re-fetch records during deletion: %w", err)
-			}
-
-			// Find the current record that matches the original record we want to delete
-			// Since ID may have changed, we match by name, type, and other properties
-			var updatedRecord *DNSRecord
-
-			for _, currentRecord := range currentRecords {
-				if c.recordsMatch(&record, &currentRecord) {
-					updatedRecord = &currentRecord
-					break
-				}
-			}
-			if updatedRecord == nil {
-				log.Warnf("Record %s no longer exists (may have been deleted already), skipping", record.Name)
-				continue
-			}
-
-			// Use the updated record ID
-			record = *updatedRecord
-			log.Debugf("using updated record ID: %s", record.ID)
-		}
-
-		// Perform the actual deletion
+		// Perform the actual deletion using the original record ID
 		resp, err := c.doRequest(http.MethodDelete, fmt.Sprintf("ip/dns/static/%s", record.ID), nil, nil)
 		if err != nil {
 			log.Errorf("error deleting DNS record %s: %v", record.ID, err)
 			return err
 		}
 		resp.Body.Close()
-		log.Debugf("record deleted: %s", record.ID)
+		log.Debugf("record deleted successfully: %s", record.ID)
 	}
 
 	log.Infof("successfully deleted %d DNS records", len(recordsToDelete))
 	return nil
-}
-
-// recordsMatch checks if two DNS records represent the same logical record
-// This is used to find records after ID changes due to deletions
-func (c *MikrotikApiClient) recordsMatch(record1, record2 *DNSRecord) bool {
-	// Match by name, type, and all record-specific fields
-	if record1.Name != record2.Name || record1.Type != record2.Type {
-		return false
-	}
-
-	// Match by target values based on record type
-	switch record1.Type {
-	case "A", "AAAA":
-		return record1.Address == record2.Address
-	case "CNAME":
-		return record1.CName == record2.CName
-	case "TXT":
-		return record1.Text == record2.Text
-	case "MX":
-		return record1.MXExchange == record2.MXExchange && record1.MXPreference == record2.MXPreference
-	case "SRV":
-		return record1.SrvTarget == record2.SrvTarget &&
-			record1.SrvPort == record2.SrvPort &&
-			record1.SrvPriority == record2.SrvPriority &&
-			record1.SrvWeight == record2.SrvWeight
-	case "NS":
-		return record1.NS == record2.NS
-	default:
-		// For unknown record types, match by comment as well
-		return record1.Comment == record2.Comment
-	}
 }
 
 // CreateDNSRecords creates multiple DNS records in batch (one API call per record)
@@ -366,14 +301,17 @@ func (c *MikrotikApiClient) CreateDNSRecords(ep *endpoint.Endpoint) ([]*DNSRecor
 	}
 
 	var createdRecords []*DNSRecord
+	var lastError error
+
 	for i, record := range records {
 		log.Debugf("creating DNS record %d/%d: %+v", i+1, len(records), record)
 
 		createdRecord, err := c.createSingleDNSRecord(record)
 		if err != nil {
-			// Ignore the error and continue with the next record
+			// Keep track of the last error but continue with the next record
 			// This will be handled in the next webhook synchronization
 			log.Errorf("failed to create DNS record %d: %v, continuing with next record", i+1, err)
+			lastError = err
 			continue
 		}
 
@@ -381,6 +319,12 @@ func (c *MikrotikApiClient) CreateDNSRecords(ep *endpoint.Endpoint) ([]*DNSRecor
 	}
 
 	log.Infof("successfully created %d DNS records", len(createdRecords))
+
+	// If no records were successfully created and we have errors, return the last error
+	if len(createdRecords) == 0 && lastError != nil {
+		return nil, lastError
+	}
+
 	return createdRecords, nil
 }
 

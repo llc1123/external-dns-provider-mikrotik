@@ -440,7 +440,7 @@ func TestDeleteDNSRecordsRequestValidation(t *testing.T) {
 			}
 			tc.expectedGetRequest.Validate(t, requests[:1])
 
-			// Filter out DELETE requests (ignore intermediate GET requests for record re-fetching)
+			// Filter out DELETE requests (no intermediate GET requests needed since IDs are stable)
 			var deleteRequests []RequestCapture
 			for i := 1; i < len(requests); i++ { // Skip first GET request
 				if requests[i].Method == "DELETE" {
