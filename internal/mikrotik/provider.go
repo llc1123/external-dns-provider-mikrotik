@@ -176,14 +176,19 @@ func (p *MikrotikProvider) smartUpdateEndpoint(oldEndpoint, newEndpoint *endpoin
 
 	log.Infof("Smart update for %s: %d targets to delete, %d targets to add", newEndpoint.DNSName, len(toDelete), len(toAdd))
 
-	// Delete obsolete targets
-	for _, target := range toDelete {
-		record := currentTargets[target]
-		log.Debugf("Deleting obsolete target: %s (ID: %s)", target, record.ID)
+	// Delete obsolete targets using batch deletion
+	if len(toDelete) > 0 {
+		// Create a temporary endpoint for batch deletion of obsolete targets
+		deleteEndpoint := &endpoint.Endpoint{
+			DNSName:    newEndpoint.DNSName,
+			RecordType: newEndpoint.RecordType,
+			Targets:    toDelete,
+		}
 
-		err := p.client.DeleteDNSRecordByID(record.ID)
+		log.Debugf("Batch deleting %d obsolete targets for %s", len(toDelete), newEndpoint.DNSName)
+		err := p.client.DeleteDNSRecords(deleteEndpoint)
 		if err != nil {
-			return fmt.Errorf("failed to delete record %s: %w", record.ID, err)
+			return fmt.Errorf("failed to batch delete obsolete targets for %s: %w", newEndpoint.DNSName, err)
 		}
 	}
 
@@ -205,26 +210,6 @@ func (p *MikrotikProvider) smartUpdateEndpoint(oldEndpoint, newEndpoint *endpoin
 	}
 
 	return nil
-}
-
-// Helper function to get target value from a DNS record
-func getRecordTarget(record *DNSRecord) string {
-	switch record.Type {
-	case "A", "AAAA":
-		return record.Address
-	case "CNAME":
-		return record.CName
-	case "TXT":
-		return record.Text
-	case "MX":
-		return record.MXExchange
-	case "SRV":
-		return record.SrvTarget
-	case "NS":
-		return record.NS
-	default:
-		return ""
-	}
 }
 
 // Helper function to get map keys

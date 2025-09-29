@@ -91,17 +91,6 @@ func NewDNSRecords(ep *endpoint.Endpoint) ([]*DNSRecord, error) {
 	return records, nil
 }
 
-// NewDNSRecord converts an ExternalDNS Endpoint to a single Mikrotik DNSRecord (backward compatibility)
-// This function now uses the first target only for backward compatibility
-func NewDNSRecord(endpoint *endpoint.Endpoint) (*DNSRecord, error) {
-	records, err := NewDNSRecords(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	// Return the first record for backward compatibility
-	return records[0], nil
-}
-
 // newSingleDNSRecord converts a single-target ExternalDNS Endpoint to a Mikrotik DNSRecord
 // This is the original NewDNSRecord function, now renamed for internal use
 func newSingleDNSRecord(endpoint *endpoint.Endpoint) (*DNSRecord, error) {
@@ -605,7 +594,7 @@ func parseSRV(data string) (string, string, string, string, error) {
 }
 
 // AggregateRecordsToEndpoints groups DNS records by name+type and converts them to ExternalDNS endpoints
-// Only records with comment matching DefaultComment are considered managed by external-dns
+// All provided records are assumed to be managed by external-dns (already filtered by GetAllDNSRecords)
 func AggregateRecordsToEndpoints(records []DNSRecord, defaultComment string) ([]*endpoint.Endpoint, error) {
 	log.Debugf("Aggregating %d DNS records to endpoints", len(records))
 
@@ -614,11 +603,11 @@ func AggregateRecordsToEndpoints(records []DNSRecord, defaultComment string) ([]
 	for i := range records {
 		record := &records[i]
 
-		// Only consider records that have the default comment (managed by external-dns)
+		// All records should already have the correct comment (filtered by GetAllDNSRecords)
+		// But we'll add a debug log for verification
 		if record.Comment != defaultComment {
-			log.Debugf("Skipping record %s (ID: %s) - comment '%s' does not match default comment '%s'",
+			log.Warnf("Record %s (ID: %s) has unexpected comment '%s', expected '%s'. This should not happen.",
 				record.Name, record.ID, record.Comment, defaultComment)
-			continue
 		}
 
 		// Group by name+type

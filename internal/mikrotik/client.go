@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/publicsuffix"
@@ -18,7 +19,7 @@ import (
 
 type MikrotikDefaults struct {
 	DefaultTTL     int64  `env:"MIKROTIK_DEFAULT_TTL" envDefault:"3600"`
-	DefaultComment string `env:"MIKROTIK_DEFAULT_COMMENT" envDefault:""`
+	DefaultComment string `env:"MIKROTIK_DEFAULT_COMMENT" envDefault:"Managed By ExternalDNS"`
 }
 
 // MikrotikConnectionConfig holds the connection details for the API client
@@ -34,6 +35,7 @@ type MikrotikApiClient struct {
 	*MikrotikDefaults
 	*MikrotikConnectionConfig
 	*http.Client
+	deleteMutex sync.Mutex // Global lock to prevent concurrent delete operations
 }
 
 // MikrotikSystemInfo represents MikroTik system information
@@ -62,6 +64,11 @@ type MikrotikSystemInfo struct {
 // NewMikrotikClient creates a new instance of MikrotikApiClient
 func NewMikrotikClient(config *MikrotikConnectionConfig, defaults *MikrotikDefaults) (*MikrotikApiClient, error) {
 	log.Infof("creating a new Mikrotik API Client")
+
+	// Validate that DefaultComment is not empty
+	if defaults.DefaultComment == "" {
+		return nil, fmt.Errorf("DefaultComment cannot be empty - it's required to identify records managed by external-dns")
+	}
 
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err != nil {
@@ -138,6 +145,7 @@ func (c *MikrotikApiClient) GetSystemInfo() (*MikrotikSystemInfo, error) {
 }
 
 // GetAllDNSRecords fetches all DNS records from the MikroTik API
+// Only returns records with DefaultComment (managed by external-dns)
 func (c *MikrotikApiClient) GetAllDNSRecords() ([]DNSRecord, error) {
 	log.Debugf("fetching all DNS records")
 
@@ -150,19 +158,34 @@ func (c *MikrotikApiClient) GetAllDNSRecords() ([]DNSRecord, error) {
 	defer resp.Body.Close()
 
 	// Parse the response
-	var records []DNSRecord
-	if err = json.NewDecoder(resp.Body).Decode(&records); err != nil {
+	var allRecords []DNSRecord
+	if err = json.NewDecoder(resp.Body).Decode(&allRecords); err != nil {
 		log.Errorf("error decoding response body: %v", err)
 		return nil, err
 	}
 
-	log.Debugf("fetched %d DNS records: %v", len(records), records)
+	// Filter records to only include those managed by external-dns (matching DefaultComment)
+	var managedRecords []DNSRecord
+	for _, record := range allRecords {
+		if record.Comment == c.DefaultComment {
+			managedRecords = append(managedRecords, record)
+		} else {
+			log.Debugf("Skipping record %s (ID: %s) - comment '%s' does not match default comment '%s'",
+				record.Name, record.ID, record.Comment, c.DefaultComment)
+		}
+	}
 
-	return records, nil
+	log.Debugf("fetched %d total DNS records, %d managed by external-dns", len(allRecords), len(managedRecords))
+
+	return managedRecords, nil
 }
 
 // DeleteDNSRecords deletes all DNS records associated with an endpoint
 func (c *MikrotikApiClient) DeleteDNSRecords(endpoint *endpoint.Endpoint) error {
+	// Use global lock to prevent concurrent delete operations
+	c.deleteMutex.Lock()
+	defer c.deleteMutex.Unlock()
+
 	log.Infof("deleting DNS records for endpoint: %+v", endpoint)
 
 	// Find all records that match this endpoint
@@ -171,20 +194,36 @@ func (c *MikrotikApiClient) DeleteDNSRecords(endpoint *endpoint.Endpoint) error 
 		return fmt.Errorf("failed to get all DNS records: %w", err)
 	}
 
-	// Find matching records based on name, type, and default comment
+	// Find matching records based on name, type, and optionally specific targets
 	var recordsToDelete []DNSRecord
 	for _, record := range allRecords {
-		log.Debugf("Checking record: Name='%s', Type='%s', Comment='%s' against DNSName='%s', RecordType='%s', DefaultComment='%s'",
-			record.Name, record.Type, record.Comment, endpoint.DNSName, endpoint.RecordType, c.DefaultComment)
+		log.Debugf("Checking record: Name='%s', Type='%s', Comment='%s' against DNSName='%s', RecordType='%s'",
+			record.Name, record.Type, record.Comment, endpoint.DNSName, endpoint.RecordType)
 
-		// SECURITY: Strict matching - must match name, type AND default comment exactly
+		// SECURITY: Strict matching - must match name and type
 		if record.Name == endpoint.DNSName && record.Type == endpoint.RecordType {
 			log.Debugf("Found matching record: %s (ID: %s, Comment: '%s')", record.Name, record.ID, record.Comment)
 
 			// Only delete records with matching default comment (managed by external-dns)
 			if record.Comment == c.DefaultComment {
-				log.Debugf("Comment matches default comment: '%s', adding to delete list", record.Comment)
-				recordsToDelete = append(recordsToDelete, record)
+				// If specific targets are provided, only delete records with matching targets
+				if len(endpoint.Targets) > 0 {
+					recordTarget := getRecordTarget(&record)
+					if recordTarget != "" {
+						// Check if this record's target is in the list of targets to delete
+						for _, targetToDelete := range endpoint.Targets {
+							if recordTarget == targetToDelete {
+								log.Debugf("Target matches: '%s', adding to delete list", recordTarget)
+								recordsToDelete = append(recordsToDelete, record)
+								break
+							}
+						}
+					}
+				} else {
+					// No specific targets provided, delete all records with matching name/type/comment
+					log.Debugf("No specific targets provided, adding all matching records to delete list")
+					recordsToDelete = append(recordsToDelete, record)
+				}
 			} else {
 				// Skip records with different comments - they may not be managed by external-dns
 				log.Debugf("Skipping record with different comment: %s (expected: '%s', found: '%s')",
@@ -198,10 +237,42 @@ func (c *MikrotikApiClient) DeleteDNSRecords(endpoint *endpoint.Endpoint) error 
 		return nil
 	}
 
-	// Delete each record
-	for _, record := range recordsToDelete {
-		log.Debugf("deleting DNS record: %s", record.ID)
+	// Delete records one by one with re-verification for each deletion
+	// This is necessary because MikroTik reorders IDs after each deletion
+	for i, record := range recordsToDelete {
+		log.Debugf("deleting DNS record %d/%d: %s", i+1, len(recordsToDelete), record.ID)
 
+		// Before each deletion, re-fetch current records to get updated IDs
+		// This is important because previous deletions may have changed the ID numbering
+		if i > 0 {
+			log.Debugf("re-fetching records to get updated IDs after previous deletions")
+			currentRecords, err := c.GetAllDNSRecords()
+			if err != nil {
+				log.Errorf("failed to re-fetch DNS records during deletion: %v", err)
+				return fmt.Errorf("failed to re-fetch records during deletion: %w", err)
+			}
+
+			// Find the current record that matches the original record we want to delete
+			// Since ID may have changed, we match by name, type, and other properties
+			var updatedRecord *DNSRecord
+			for _, currentRecord := range currentRecords {
+				if c.recordsMatch(&record, &currentRecord) {
+					updatedRecord = &currentRecord
+					break
+				}
+			}
+
+			if updatedRecord == nil {
+				log.Warnf("Record %s no longer exists (may have been deleted already), skipping", record.Name)
+				continue
+			}
+
+			// Use the updated record ID
+			record = *updatedRecord
+			log.Debugf("using updated record ID: %s", record.ID)
+		}
+
+		// Perform the actual deletion
 		resp, err := c.doRequest(http.MethodDelete, fmt.Sprintf("ip/dns/static/%s", record.ID), nil)
 		if err != nil {
 			log.Errorf("error deleting DNS record %s: %v", record.ID, err)
@@ -215,6 +286,37 @@ func (c *MikrotikApiClient) DeleteDNSRecords(endpoint *endpoint.Endpoint) error 
 	return nil
 }
 
+// recordsMatch checks if two DNS records represent the same logical record
+// This is used to find records after ID changes due to deletions
+func (c *MikrotikApiClient) recordsMatch(record1, record2 *DNSRecord) bool {
+	// Match by name, type, and all record-specific fields
+	if record1.Name != record2.Name || record1.Type != record2.Type {
+		return false
+	}
+
+	// Match by target values based on record type
+	switch record1.Type {
+	case "A", "AAAA":
+		return record1.Address == record2.Address
+	case "CNAME":
+		return record1.CName == record2.CName
+	case "TXT":
+		return record1.Text == record2.Text
+	case "MX":
+		return record1.MXExchange == record2.MXExchange && record1.MXPreference == record2.MXPreference
+	case "SRV":
+		return record1.SrvTarget == record2.SrvTarget &&
+			record1.SrvPort == record2.SrvPort &&
+			record1.SrvPriority == record2.SrvPriority &&
+			record1.SrvWeight == record2.SrvWeight
+	case "NS":
+		return record1.NS == record2.NS
+	default:
+		// For unknown record types, match by comment as well
+		return record1.Comment == record2.Comment
+	}
+}
+
 // CreateDNSRecords creates multiple DNS records in batch (one API call per record)
 func (c *MikrotikApiClient) CreateDNSRecords(ep *endpoint.Endpoint) ([]*DNSRecord, error) {
 	log.Infof("creating DNS records for endpoint: %+v", ep)
@@ -223,6 +325,12 @@ func (c *MikrotikApiClient) CreateDNSRecords(ep *endpoint.Endpoint) ([]*DNSRecor
 	records, err := NewDNSRecords(ep)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert endpoint to DNS records: %w", err)
+	}
+
+	// Ensure all records use the DefaultComment (managed by external-dns)
+	for _, record := range records {
+		record.Comment = c.DefaultComment
+		log.Debugf("Set comment to DefaultComment '%s' for record %s", c.DefaultComment, record.Name)
 	}
 
 	var createdRecords []*DNSRecord
@@ -274,17 +382,22 @@ func (c *MikrotikApiClient) createSingleDNSRecord(record *DNSRecord) (*DNSRecord
 	return &createdRecord, nil
 }
 
-// DeleteDNSRecordByID deletes a single DNS record by its ID
-func (c *MikrotikApiClient) DeleteDNSRecordByID(recordID string) error {
-	log.Debugf("deleting DNS record by ID: %s", recordID)
-
-	resp, err := c.doRequest("DELETE", fmt.Sprintf("ip/dns/static/%s", recordID), nil)
-	if err != nil {
-		log.Errorf("failed to delete record %s: %v", recordID, err)
-		return fmt.Errorf("failed to delete record %s: %w", recordID, err)
+// getRecordTarget extracts the target value from a DNS record based on its type
+func getRecordTarget(record *DNSRecord) string {
+	switch record.Type {
+	case "A", "AAAA":
+		return record.Address
+	case "CNAME":
+		return record.CName
+	case "TXT":
+		return record.Text
+	case "MX":
+		return record.MXExchange
+	case "SRV":
+		return record.SrvTarget
+	case "NS":
+		return record.NS
+	default:
+		return ""
 	}
-	defer resp.Body.Close()
-
-	log.Debugf("successfully deleted record: %s", recordID)
-	return nil
 }

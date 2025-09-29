@@ -871,13 +871,6 @@ func TestExternalDNSEndpointToDNSRecord(t *testing.T) {
 				Targets:    endpoint.NewTargets("192.0.2.1", "192.0.2.2"),
 				RecordTTL:  endpoint.TTL(3600),
 			},
-			expected: &DNSRecord{
-				Name:    "multi.example.com",
-				Type:    "A",
-				Address: "192.0.2.1", // Should use the first target
-				TTL:     "1h",
-				Comment: "", // 不再包含GroupKey
-			},
 			expectedRecords: []*DNSRecord{
 				{
 					Name:    "multi.example.com",
@@ -957,13 +950,6 @@ func TestExternalDNSEndpointToDNSRecord(t *testing.T) {
 				RecordType: "AAAA",
 				Targets:    endpoint.NewTargets("2001:db8::1", "2001:db8::2"),
 				RecordTTL:  endpoint.TTL(3600),
-			},
-			expected: &DNSRecord{
-				Name:    "multi.example.com",
-				Type:    "AAAA",
-				Address: "2001:db8::1", // Should use the first target
-				TTL:     "1h",
-				Comment: "",
 			},
 			expectedRecords: []*DNSRecord{
 				{
@@ -1551,20 +1537,15 @@ func TestExternalDNSEndpointToDNSRecord(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			records, recordsErr := NewDNSRecords(tt.endpoint)
-			record, recordErr := NewDNSRecord(tt.endpoint)
 
 			if tt.expectError {
 				assert.Error(t, recordsErr)
 				assert.Nil(t, records)
-				assert.Error(t, recordErr)
-				assert.Nil(t, record)
 				return
 			}
 
 			assert.NoError(t, recordsErr)
-			assert.NoError(t, recordErr)
 			assert.NotNil(t, records)
-			assert.NotNil(t, record)
 
 			expectedRecords := tt.expectedRecords
 			if expectedRecords == nil && tt.expected != nil {
@@ -1604,36 +1585,6 @@ func TestExternalDNSEndpointToDNSRecord(t *testing.T) {
 					case "NS":
 						assert.Equal(t, expectedRecord.NS, actualRecord.NS)
 					}
-				}
-
-				// Ensure the backward-compatible helper still returns the first record
-				firstExpected := expectedRecords[0]
-				assert.Equal(t, firstExpected.Name, record.Name)
-				assert.Equal(t, firstExpected.Type, record.Type)
-				assert.Equal(t, firstExpected.TTL, record.TTL)
-				assert.Equal(t, firstExpected.Comment, record.Comment)
-				assert.Equal(t, firstExpected.Regexp, record.Regexp)
-				assert.Equal(t, firstExpected.MatchSubdomain, record.MatchSubdomain)
-				assert.Equal(t, firstExpected.AddressList, record.AddressList)
-				assert.Equal(t, firstExpected.Disabled, record.Disabled)
-
-				switch record.Type {
-				case "A", "AAAA":
-					assert.Equal(t, firstExpected.Address, record.Address)
-				case "CNAME":
-					assert.Equal(t, firstExpected.CName, record.CName)
-				case "TXT":
-					assert.Equal(t, firstExpected.Text, record.Text)
-				case "MX":
-					assert.Equal(t, firstExpected.MXPreference, record.MXPreference)
-					assert.Equal(t, firstExpected.MXExchange, record.MXExchange)
-				case "SRV":
-					assert.Equal(t, firstExpected.SrvPriority, record.SrvPriority)
-					assert.Equal(t, firstExpected.SrvWeight, record.SrvWeight)
-					assert.Equal(t, firstExpected.SrvPort, record.SrvPort)
-					assert.Equal(t, firstExpected.SrvTarget, record.SrvTarget)
-				case "NS":
-					assert.Equal(t, firstExpected.NS, record.NS)
 				}
 			}
 		})

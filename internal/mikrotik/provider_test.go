@@ -52,12 +52,12 @@ func NewEndpointWithType(dnsName, target, recordType string, ttl int64, provider
 func TestGetProviderSpecificOrDefault(t *testing.T) {
 	mikrotikProvider := &MikrotikProvider{
 		client: &MikrotikApiClient{
-			&MikrotikDefaults{
+			MikrotikDefaults: &MikrotikDefaults{
 				DefaultTTL:     defaultTTL,
 				DefaultComment: defaultComment,
 			},
-			nil,
-			nil,
+			MikrotikConnectionConfig: nil,
+			Client:                   nil,
 		},
 	}
 	tests := []struct {
@@ -110,12 +110,12 @@ func TestGetProviderSpecificOrDefault(t *testing.T) {
 func TestCompareEndpoints(t *testing.T) {
 	mikrotikProvider := &MikrotikProvider{
 		client: &MikrotikApiClient{
-			&MikrotikDefaults{
+			MikrotikDefaults: &MikrotikDefaults{
 				DefaultTTL:     int64(defaultTTL),
 				DefaultComment: defaultComment,
 			},
-			nil,
-			nil,
+			MikrotikConnectionConfig: nil,
+			Client:                   nil,
 		},
 	}
 	tests := []struct {
@@ -328,11 +328,11 @@ func TestListContains(t *testing.T) {
 	defaultTTL := 1800
 	mikrotikProvider := &MikrotikProvider{
 		client: &MikrotikApiClient{
-			&MikrotikDefaults{
+			MikrotikDefaults: &MikrotikDefaults{
 				DefaultTTL: int64(defaultTTL),
 			},
-			nil,
-			nil,
+			MikrotikConnectionConfig: nil,
+			Client:                   nil,
 		},
 	}
 	tests := []struct {
@@ -386,12 +386,12 @@ func TestListContains(t *testing.T) {
 func TestChanges(t *testing.T) {
 	mikrotikProvider := &MikrotikProvider{
 		client: &MikrotikApiClient{
-			&MikrotikDefaults{
+			MikrotikDefaults: &MikrotikDefaults{
 				DefaultTTL:     int64(defaultTTL),
 				DefaultComment: defaultComment,
 			},
-			nil,
-			nil,
+			MikrotikConnectionConfig: nil,
+			Client:                   nil,
 		},
 	}
 
@@ -894,10 +894,12 @@ func TestMikrotikProvider_Records(t *testing.T) {
 
 func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 	tests := []struct {
-		name             string
-		changes          *plan.Changes
-		expectError      bool
-		simulateAPIError bool
+		name                string
+		changes             *plan.Changes
+		expectError         bool
+		simulateAPIError    bool
+		expectedPutCalls    int // Expected number of PUT (create) calls
+		expectedDeleteCalls int // Expected number of DELETE calls
 	}{
 		{
 			name: "Successful create operation",
@@ -906,8 +908,10 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 					NewEndpoint("new.example.com", "1.2.3.4", 3600, nil),
 				},
 			},
-			expectError:      false,
-			simulateAPIError: false,
+			expectError:         false,
+			simulateAPIError:    false,
+			expectedPutCalls:    1,
+			expectedDeleteCalls: 0,
 		},
 		{
 			name: "Successful delete operation",
@@ -916,8 +920,10 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 					NewEndpoint("delete.example.com", "1.2.3.4", 3600, nil),
 				},
 			},
-			expectError:      false,
-			simulateAPIError: false,
+			expectError:         false,
+			simulateAPIError:    false,
+			expectedPutCalls:    0,
+			expectedDeleteCalls: 1,
 		},
 		{
 			name: "Successful update operation",
@@ -929,8 +935,10 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 					NewEndpoint("update.example.com", "5.6.7.8", 3600, nil),
 				},
 			},
-			expectError:      false,
-			simulateAPIError: false,
+			expectError:         false,
+			simulateAPIError:    false,
+			expectedPutCalls:    1, // Smart update might create new targets
+			expectedDeleteCalls: 1, // Smart update might delete old targets
 		},
 		{
 			name: "Domain filter security violation",
@@ -939,13 +947,83 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 					NewEndpoint("malicious.attacker.com", "1.2.3.4", 3600, nil),
 				},
 			},
-			expectError:      true,
-			simulateAPIError: false,
+			expectError:         true,
+			simulateAPIError:    false,
+			expectedPutCalls:    0,
+			expectedDeleteCalls: 0,
+		},
+		{
+			name: "Update with overlapping records - should skip identical ones",
+			changes: &plan.Changes{
+				UpdateOld: []*endpoint.Endpoint{
+					// This record is identical in both old and new - should be skipped
+					NewEndpoint("identical.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "same-comment"}}),
+					// This record actually changes targets - should be processed
+					NewEndpoint("changing.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "old-comment"}}),
+				},
+				UpdateNew: []*endpoint.Endpoint{
+					// This record is identical to the old one - should be skipped
+					NewEndpoint("identical.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "same-comment"}}),
+					// This record has different target - should be processed
+					NewEndpoint("changing.example.com", "5.6.7.8", 3600, []map[string]string{{"comment": "new-comment"}}),
+				},
+			},
+			expectError:         false,
+			simulateAPIError:    false,
+			expectedPutCalls:    1, // smartUpdate creates new target - note: the identical record should be filtered out by changes()
+			expectedDeleteCalls: 0, // Note: DELETE might be 0 if no existing record is found to delete
+		},
+		{
+			name: "Update with all identical records - should skip all operations",
+			changes: &plan.Changes{
+				UpdateOld: []*endpoint.Endpoint{
+					NewEndpoint("same1.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "test"}}),
+					NewEndpoint("same2.example.com", "5.6.7.8", 1800, []map[string]string{{"disabled": "false"}}),
+				},
+				UpdateNew: []*endpoint.Endpoint{
+					NewEndpoint("same1.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "test"}}),
+					NewEndpoint("same2.example.com", "5.6.7.8", 1800, []map[string]string{{"disabled": "false"}}),
+				},
+			},
+			expectError:         false,
+			simulateAPIError:    false,
+			expectedPutCalls:    0, // All records are identical, no operations should occur
+			expectedDeleteCalls: 0, // All records are identical, no operations should occur
+		},
+		{
+			name: "Complex change scenario with creates, deletes, and overlapping updates",
+			changes: &plan.Changes{
+				Create: []*endpoint.Endpoint{
+					NewEndpoint("new.example.com", "1.1.1.1", 3600, nil),
+				},
+				Delete: []*endpoint.Endpoint{
+					NewEndpoint("delete.example.com", "2.2.2.2", 3600, nil),
+				},
+				UpdateOld: []*endpoint.Endpoint{
+					// Identical - should be filtered out
+					NewEndpoint("no-change.example.com", "3.3.3.3", 3600, []map[string]string{{"comment": "unchanged"}}),
+					// Different targets - should be processed
+					NewEndpoint("real-update.example.com", "4.4.4.4", 3600, []map[string]string{{"comment": "old"}}),
+				},
+				UpdateNew: []*endpoint.Endpoint{
+					// Identical - should be filtered out
+					NewEndpoint("no-change.example.com", "3.3.3.3", 3600, []map[string]string{{"comment": "unchanged"}}),
+					// Different targets - should be processed
+					NewEndpoint("real-update.example.com", "8.8.8.8", 3600, []map[string]string{{"comment": "new"}}),
+				},
+			},
+			expectError:         false,
+			simulateAPIError:    false,
+			expectedPutCalls:    2, // 1 create + 1 for smartUpdate (new target)
+			expectedDeleteCalls: 1, // 1 explicit delete (smartUpdate might not delete if no matching record found)
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Counters to track API calls
+			var putCallCount, deleteCallCount int
+
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// Simulate API error
 				if tt.simulateAPIError {
@@ -967,6 +1045,13 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 							ID:      "*1",
 							Name:    "delete.example.com",
 							Type:    "A",
+							Address: "2.2.2.2",
+							Comment: "external-dns",
+						},
+						{
+							ID:      "*1b",
+							Name:    "delete.example.com",
+							Type:    "A",
 							Address: "1.2.3.4",
 							Comment: "external-dns",
 						},
@@ -977,6 +1062,48 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 							Address: "1.2.3.4",
 							Comment: "external-dns",
 						},
+						{
+							ID:      "*3",
+							Name:    "identical.example.com",
+							Type:    "A",
+							Address: "1.2.3.4",
+							Comment: "same-comment",
+						},
+						{
+							ID:      "*4",
+							Name:    "changing.example.com",
+							Type:    "A",
+							Address: "1.2.3.4",
+							Comment: "old-comment",
+						},
+						{
+							ID:      "*5",
+							Name:    "same1.example.com",
+							Type:    "A",
+							Address: "1.2.3.4",
+							Comment: "test",
+						},
+						{
+							ID:      "*6",
+							Name:    "same2.example.com",
+							Type:    "A",
+							Address: "5.6.7.8",
+							Comment: "external-dns",
+						},
+						{
+							ID:      "*7",
+							Name:    "no-change.example.com",
+							Type:    "A",
+							Address: "3.3.3.3",
+							Comment: "unchanged",
+						},
+						{
+							ID:      "*8",
+							Name:    "real-update.example.com",
+							Type:    "A",
+							Address: "4.4.4.4",
+							Comment: "old",
+						},
 					}
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(mockRecords)
@@ -985,6 +1112,7 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 
 				// Handle PUT requests (create)
 				if r.Method == http.MethodPut && r.URL.Path == "/rest/ip/dns/static" {
+					putCallCount++
 					var record DNSRecord
 					json.NewDecoder(r.Body).Decode(&record)
 					record.ID = "*new"
@@ -995,6 +1123,7 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 
 				// Handle DELETE requests
 				if r.Method == http.MethodDelete {
+					deleteCallCount++
 					w.WriteHeader(http.StatusOK)
 					return
 				}
@@ -1038,6 +1167,14 @@ func TestMikrotikProvider_ApplyChanges(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Expected no error, got %v", err)
 				}
+
+				// Verify API call counts to ensure duplicates were skipped
+				if putCallCount != tt.expectedPutCalls {
+					t.Errorf("Expected %d PUT calls, got %d", tt.expectedPutCalls, putCallCount)
+				}
+				if deleteCallCount != tt.expectedDeleteCalls {
+					t.Errorf("Expected %d DELETE calls, got %d", tt.expectedDeleteCalls, deleteCallCount)
+				}
 			}
 		})
 	}
@@ -1064,5 +1201,86 @@ func TestMikrotikProvider_GetDomainFilter(t *testing.T) {
 	}
 	if result.Match("notallowed.com") {
 		t.Error("Expected notallowed.com to NOT match domain filter")
+	}
+}
+
+// TestMikrotikProvider_ApplyChanges_OverlapFiltering specifically tests that identical records
+// in UpdateOld and UpdateNew are filtered out and not processed
+func TestMikrotikProvider_ApplyChanges_OverlapFiltering(t *testing.T) {
+	// Create provider
+	domainFilter := endpoint.NewDomainFilter([]string{"example.com"})
+	defaults := &MikrotikDefaults{
+		DefaultTTL:     3600,
+		DefaultComment: "external-dns",
+	}
+
+	// Mock client for testing without actual HTTP requests
+	mockClient := &MikrotikApiClient{
+		MikrotikDefaults: defaults,
+	}
+
+	provider := &MikrotikProvider{
+		client:       mockClient,
+		domainFilter: domainFilter,
+	}
+
+	// Test case 1: All identical records should be filtered out
+	changes := &plan.Changes{
+		UpdateOld: []*endpoint.Endpoint{
+			NewEndpoint("same1.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "test"}}),
+			NewEndpoint("same2.example.com", "5.6.7.8", 1800, []map[string]string{{"disabled": "false"}}),
+		},
+		UpdateNew: []*endpoint.Endpoint{
+			NewEndpoint("same1.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "test"}}),
+			NewEndpoint("same2.example.com", "5.6.7.8", 1800, []map[string]string{{"disabled": "false"}}),
+		},
+	}
+
+	// Apply changes() method to filter duplicates
+	filteredChanges := provider.changes(changes)
+
+	// Verify that all identical records were filtered out
+	if len(filteredChanges.UpdateOld) != 0 {
+		t.Errorf("Expected 0 UpdateOld after filtering, got %d", len(filteredChanges.UpdateOld))
+	}
+	if len(filteredChanges.UpdateNew) != 0 {
+		t.Errorf("Expected 0 UpdateNew after filtering, got %d", len(filteredChanges.UpdateNew))
+	}
+
+	// Test case 2: Mixed scenario - some identical, some different
+	changes2 := &plan.Changes{
+		UpdateOld: []*endpoint.Endpoint{
+			// Identical - should be filtered out
+			NewEndpoint("identical.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "same-comment"}}),
+			// Different - should remain
+			NewEndpoint("different.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "old-comment"}}),
+		},
+		UpdateNew: []*endpoint.Endpoint{
+			// Identical - should be filtered out
+			NewEndpoint("identical.example.com", "1.2.3.4", 3600, []map[string]string{{"comment": "same-comment"}}),
+			// Different - should remain
+			NewEndpoint("different.example.com", "5.6.7.8", 3600, []map[string]string{{"comment": "new-comment"}}),
+		},
+	}
+
+	filteredChanges2 := provider.changes(changes2)
+
+	// Verify filtering results
+	if len(filteredChanges2.UpdateOld) != 1 {
+		t.Errorf("Expected 1 UpdateOld after filtering, got %d", len(filteredChanges2.UpdateOld))
+	}
+	if len(filteredChanges2.UpdateNew) != 1 {
+		t.Errorf("Expected 1 UpdateNew after filtering, got %d", len(filteredChanges2.UpdateNew))
+	}
+
+	// Verify the remaining record is the different one
+	if len(filteredChanges2.UpdateOld) > 0 && filteredChanges2.UpdateOld[0].DNSName != "different.example.com" {
+		t.Errorf("Expected remaining UpdateOld to be 'different.example.com', got %s", filteredChanges2.UpdateOld[0].DNSName)
+	}
+	if len(filteredChanges2.UpdateNew) > 0 && filteredChanges2.UpdateNew[0].DNSName != "different.example.com" {
+		t.Errorf("Expected remaining UpdateNew to be 'different.example.com', got %s", filteredChanges2.UpdateNew[0].DNSName)
+	}
+	if len(filteredChanges2.UpdateNew) > 0 && filteredChanges2.UpdateNew[0].Targets[0] != "5.6.7.8" {
+		t.Errorf("Expected remaining UpdateNew target to be '5.6.7.8', got %s", filteredChanges2.UpdateNew[0].Targets[0])
 	}
 }

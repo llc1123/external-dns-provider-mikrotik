@@ -59,6 +59,34 @@ func TestNewMikrotikClient(t *testing.T) {
 	}
 }
 
+func TestNewMikrotikClientEmptyComment(t *testing.T) {
+	config := &MikrotikConnectionConfig{
+		BaseUrl:       "https://192.168.88.1:443",
+		Username:      "admin",
+		Password:      "password",
+		SkipTLSVerify: true,
+	}
+
+	defaults := &MikrotikDefaults{
+		DefaultTTL:     1900,
+		DefaultComment: "", // Empty comment should cause error
+	}
+
+	client, err := NewMikrotikClient(config, defaults)
+	if err == nil {
+		t.Fatalf("Expected error for empty DefaultComment, got none")
+	}
+
+	if client != nil {
+		t.Errorf("Expected client to be nil when error occurs, got %v", client)
+	}
+
+	expectedErrorMsg := "DefaultComment cannot be empty"
+	if err.Error() != "DefaultComment cannot be empty - it's required to identify records managed by external-dns" {
+		t.Errorf("Expected error message to contain '%s', got '%s'", expectedErrorMsg, err.Error())
+	}
+}
+
 func TestGetSystemInfo(t *testing.T) {
 	mockServerInfo := MikrotikSystemInfo{
 		ArchitectureName:     "arm64",
@@ -124,7 +152,7 @@ func TestGetSystemInfo(t *testing.T) {
 				Password:      mockPassword,
 				SkipTLSVerify: true,
 			},
-			defaults:      MikrotikDefaults{},
+			defaults:      MikrotikDefaults{DefaultComment: "test"},
 			expectedError: false,
 		},
 		{
@@ -135,7 +163,7 @@ func TestGetSystemInfo(t *testing.T) {
 				Password:      "wrongpass",
 				SkipTLSVerify: true,
 			},
-			defaults:      MikrotikDefaults{},
+			defaults:      MikrotikDefaults{DefaultComment: "test"},
 			expectedError: true,
 		},
 		{
@@ -146,7 +174,7 @@ func TestGetSystemInfo(t *testing.T) {
 				Password:      mockPassword,
 				SkipTLSVerify: true,
 			},
-			defaults:      MikrotikDefaults{},
+			defaults:      MikrotikDefaults{DefaultComment: "test"},
 			expectedError: true,
 		},
 		{
@@ -157,7 +185,7 @@ func TestGetSystemInfo(t *testing.T) {
 				Password:      "wrongpass",
 				SkipTLSVerify: true,
 			},
-			defaults:      MikrotikDefaults{},
+			defaults:      MikrotikDefaults{DefaultComment: "test"},
 			expectedError: true,
 		},
 		{
@@ -168,7 +196,7 @@ func TestGetSystemInfo(t *testing.T) {
 				Password:      "",
 				SkipTLSVerify: true,
 			},
-			defaults:      MikrotikDefaults{},
+			defaults:      MikrotikDefaults{DefaultComment: "test"},
 			expectedError: true,
 		},
 	}
@@ -209,11 +237,14 @@ func TestGetSystemInfo(t *testing.T) {
 }
 
 func TestGetAllDNSRecords(t *testing.T) {
+	testDefaultComment := "external-dns"
+
 	testCases := []struct {
-		name         string
-		records      []DNSRecord
-		expectError  bool
-		unauthorized bool
+		name                  string
+		records               []DNSRecord
+		expectError           bool
+		unauthorized          bool
+		expectedFilteredCount int // Expected number after filtering
 	}{
 		{
 			name: "Multiple DNS records",
@@ -221,7 +252,7 @@ func TestGetAllDNSRecords(t *testing.T) {
 				{
 					ID:      "*1",
 					Address: "192.168.88.1",
-					Comment: "defconf",
+					Comment: "defconf", // This will be filtered out
 					Name:    "router.lan",
 					TTL:     "1d",
 					Type:    "A",
@@ -229,7 +260,7 @@ func TestGetAllDNSRecords(t *testing.T) {
 				{
 					ID:      "*3",
 					Address: "1.2.3.4",
-					Comment: "test A-Record",
+					Comment: testDefaultComment, // This will be included
 					Name:    "example.com",
 					TTL:     "1d",
 					Type:    "A",
@@ -237,7 +268,7 @@ func TestGetAllDNSRecords(t *testing.T) {
 				{
 					ID:      "*4",
 					CName:   "example.com",
-					Comment: "test CNAME",
+					Comment: testDefaultComment, // This will be included
 					Name:    "subdomain.example.com",
 					TTL:     "1d",
 					Type:    "CNAME",
@@ -245,24 +276,26 @@ func TestGetAllDNSRecords(t *testing.T) {
 				{
 					ID:      "*5",
 					Address: "::1",
-					Comment: "test AAAA",
+					Comment: "manual", // This will be filtered out
 					Name:    "test quad-A",
 					TTL:     "1d",
 					Type:    "AAAA",
 				},
 				{
 					ID:      "*6",
-					Comment: "test TXT",
+					Comment: testDefaultComment, // This will be included
 					Name:    "example.com",
 					Text:    "lorem ipsum",
 					TTL:     "1d",
 					Type:    "TXT",
 				},
 			},
+			expectedFilteredCount: 3, // Only 3 records have the correct comment
 		},
 		{
-			name:    "No DNS records",
-			records: []DNSRecord{},
+			name:                  "No DNS records",
+			records:               []DNSRecord{},
+			expectedFilteredCount: 0,
 		},
 	}
 
@@ -298,7 +331,9 @@ func TestGetAllDNSRecords(t *testing.T) {
 				Password:      mockPassword,
 				SkipTLSVerify: true,
 			}
-			defaults := &MikrotikDefaults{}
+			defaults := &MikrotikDefaults{
+				DefaultComment: testDefaultComment, // Use the test default comment
+			}
 			client, err := NewMikrotikClient(config, defaults)
 			if err != nil {
 				t.Fatalf("Failed to create client: %v", err)
@@ -314,17 +349,27 @@ func TestGetAllDNSRecords(t *testing.T) {
 					t.Fatalf("Expected no error, got %v", err)
 				}
 
-				// Verify the number of records
-				if len(records) != len(tc.records) {
-					t.Fatalf("Expected %d records, got %d", len(tc.records), len(records))
+				// Verify the number of records matches expected filtered count
+				if len(records) != tc.expectedFilteredCount {
+					t.Fatalf("Expected %d records, got %d", tc.expectedFilteredCount, len(records))
+				}
+
+				// Verify all returned records have the correct comment
+				for _, record := range records {
+					if record.Comment != testDefaultComment {
+						t.Errorf("Record %s should have comment '%s', got '%s'", record.Name, testDefaultComment, record.Comment)
+					}
 				}
 
 				// Compare records if there are any
-				if len(tc.records) > 0 {
+				if len(records) > 0 {
 					expectedRecordsMap := make(map[string]DNSRecord)
 					for _, rec := range tc.records {
-						key := rec.Name + "|" + rec.Type
-						expectedRecordsMap[key] = rec
+						// Only include records that should pass the filter
+						if rec.Comment == testDefaultComment {
+							key := rec.Name + "|" + rec.Type
+							expectedRecordsMap[key] = rec
+						}
 					}
 
 					for _, record := range records {
@@ -476,6 +521,169 @@ func TestDeleteDNSRecords(t *testing.T) {
 			expectError:       false,
 			expectedDeletions: 1,
 		},
+		{
+			name: "Partial deletion - delete only specific targets",
+			endpoint: &endpoint.Endpoint{
+				DNSName:    "partial.example.com",
+				RecordType: "A",
+				Targets:    []string{"1.2.3.4"}, // Only delete this specific target
+			},
+			existingRecords: []DNSRecord{
+				{
+					ID:      "*1",
+					Name:    "partial.example.com",
+					Type:    "A",
+					Address: "1.2.3.4", // This should be deleted
+					Comment: "external-dns",
+				},
+				{
+					ID:      "*2",
+					Name:    "partial.example.com",
+					Type:    "A",
+					Address: "5.6.7.8", // This should NOT be deleted (different target)
+					Comment: "external-dns",
+				},
+			},
+			defaultComment:    "external-dns",
+			expectError:       false,
+			expectedDeletions: 1, // Only one record should be deleted
+		},
+		{
+			name: "Partial deletion - delete multiple specific targets",
+			endpoint: &endpoint.Endpoint{
+				DNSName:    "multi-partial.example.com",
+				RecordType: "A",
+				Targets:    []string{"1.2.3.4", "5.6.7.8"}, // Delete these two targets
+			},
+			existingRecords: []DNSRecord{
+				{
+					ID:      "*1",
+					Name:    "multi-partial.example.com",
+					Type:    "A",
+					Address: "1.2.3.4", // Should be deleted
+					Comment: "external-dns",
+				},
+				{
+					ID:      "*2",
+					Name:    "multi-partial.example.com",
+					Type:    "A",
+					Address: "5.6.7.8", // Should be deleted
+					Comment: "external-dns",
+				},
+				{
+					ID:      "*3",
+					Name:    "multi-partial.example.com",
+					Type:    "A",
+					Address: "9.10.11.12", // Should NOT be deleted (not in targets)
+					Comment: "external-dns",
+				},
+			},
+			defaultComment:    "external-dns",
+			expectError:       false,
+			expectedDeletions: 2, // Only two records should be deleted
+		},
+		{
+			name: "Partial deletion - target not found",
+			endpoint: &endpoint.Endpoint{
+				DNSName:    "notfound.example.com",
+				RecordType: "A",
+				Targets:    []string{"1.2.3.4"}, // This target doesn't exist
+			},
+			existingRecords: []DNSRecord{
+				{
+					ID:      "*1",
+					Name:    "notfound.example.com",
+					Type:    "A",
+					Address: "5.6.7.8", // Different target exists
+					Comment: "external-dns",
+				},
+			},
+			defaultComment:    "external-dns",
+			expectError:       false,
+			expectedDeletions: 0, // No records should be deleted
+		},
+		{
+			name: "Partial deletion - mixed CNAME targets",
+			endpoint: &endpoint.Endpoint{
+				DNSName:    "cname-partial.example.com",
+				RecordType: "CNAME",
+				Targets:    []string{"target1.example.com"}, // Only delete this CNAME target
+			},
+			existingRecords: []DNSRecord{
+				{
+					ID:      "*1",
+					Name:    "cname-partial.example.com",
+					Type:    "CNAME",
+					CName:   "target1.example.com", // Should be deleted
+					Comment: "external-dns",
+				},
+				{
+					ID:      "*2",
+					Name:    "cname-partial.example.com",
+					Type:    "CNAME",
+					CName:   "target2.example.com", // Should NOT be deleted
+					Comment: "external-dns",
+				},
+			},
+			defaultComment:    "external-dns",
+			expectError:       false,
+			expectedDeletions: 1,
+		},
+		{
+			name: "Partial deletion - some targets exist, some don't",
+			endpoint: &endpoint.Endpoint{
+				DNSName:    "mixed-exist.example.com",
+				RecordType: "A",
+				Targets:    []string{"1.2.3.4", "5.6.7.8", "9.10.11.12"}, // Mix of existing and non-existing
+			},
+			existingRecords: []DNSRecord{
+				{
+					ID:      "*1",
+					Name:    "mixed-exist.example.com",
+					Type:    "A",
+					Address: "1.2.3.4", // Exists, should be deleted
+					Comment: "external-dns",
+				},
+				{
+					ID:      "*2",
+					Name:    "mixed-exist.example.com",
+					Type:    "A",
+					Address: "9.10.11.12", // Exists, should be deleted
+					Comment: "external-dns",
+				},
+				// Note: 5.6.7.8 doesn't exist in records
+			},
+			defaultComment:    "external-dns",
+			expectError:       false,
+			expectedDeletions: 2, // Only the two existing records should be deleted
+		},
+		{
+			name: "Partial deletion - different record types with same name",
+			endpoint: &endpoint.Endpoint{
+				DNSName:    "mixed-types.example.com",
+				RecordType: "A", // Only targeting A records
+				Targets:    []string{"1.2.3.4"},
+			},
+			existingRecords: []DNSRecord{
+				{
+					ID:      "*1",
+					Name:    "mixed-types.example.com",
+					Type:    "A",
+					Address: "1.2.3.4", // Should be deleted
+					Comment: "external-dns",
+				},
+				{
+					ID:      "*2",
+					Name:    "mixed-types.example.com",
+					Type:    "CNAME",
+					CName:   "target.example.com", // Should NOT be deleted (different type)
+					Comment: "external-dns",
+				},
+			},
+			defaultComment:    "external-dns",
+			expectError:       false,
+			expectedDeletions: 1,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -539,108 +747,6 @@ func TestDeleteDNSRecords(t *testing.T) {
 				}
 				if deletedCount != tc.expectedDeletions {
 					t.Errorf("Expected %d deletions, got %d", tc.expectedDeletions, deletedCount)
-				}
-			}
-		})
-	}
-}
-
-func TestDeleteDNSRecordByID(t *testing.T) {
-	testCases := []struct {
-		name        string
-		recordID    string
-		expectError bool
-		statusCode  int
-	}{
-		{
-			name:        "Successful deletion",
-			recordID:    "*1",
-			expectError: false,
-			statusCode:  http.StatusOK,
-		},
-		{
-			name:        "Record not found",
-			recordID:    "*999",
-			expectError: true,
-			statusCode:  http.StatusNotFound,
-		},
-		{
-			name:        "Unauthorized access",
-			recordID:    "*1",
-			expectError: true,
-			statusCode:  http.StatusUnauthorized,
-		},
-		{
-			name:        "Server error",
-			recordID:    "*1",
-			expectError: true,
-			statusCode:  http.StatusInternalServerError,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Handle unauthorized test case
-				if tc.statusCode == http.StatusUnauthorized {
-					http.Error(w, "Unauthorized", http.StatusUnauthorized)
-					return
-				}
-
-				// Basic Auth validation for other cases
-				username, password, ok := r.BasicAuth()
-				if !ok || username != mockUsername || password != mockPassword {
-					http.Error(w, "Unauthorized", http.StatusUnauthorized)
-					return
-				}
-
-				// Handle DELETE requests to /rest/ip/dns/static/{id}
-				if r.Method == http.MethodDelete && len(r.URL.Path) > len("/rest/ip/dns/static/") &&
-					r.URL.Path[:len("/rest/ip/dns/static/")] == "/rest/ip/dns/static/" {
-
-					recordID := r.URL.Path[len("/rest/ip/dns/static/"):]
-
-					// Simulate different response codes based on test case
-					if tc.statusCode == http.StatusNotFound && recordID == "*999" {
-						http.Error(w, "Not Found", http.StatusNotFound)
-						return
-					}
-					if tc.statusCode == http.StatusInternalServerError {
-						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-						return
-					}
-
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-
-				// Return 404 for any other path
-				http.NotFound(w, r)
-			}))
-			defer server.Close()
-
-			// Set up the client
-			config := &MikrotikConnectionConfig{
-				BaseUrl:       server.URL,
-				Username:      mockUsername,
-				Password:      mockPassword,
-				SkipTLSVerify: true,
-			}
-			defaults := &MikrotikDefaults{}
-			client, err := NewMikrotikClient(config, defaults)
-			if err != nil {
-				t.Fatalf("Failed to create client: %v", err)
-			}
-
-			err = client.DeleteDNSRecordByID(tc.recordID)
-
-			if tc.expectError {
-				if err == nil {
-					t.Fatalf("Expected error, got none")
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("Expected no error, got %v", err)
 				}
 			}
 		})
@@ -846,7 +952,7 @@ func TestCreateSingleDNSRecord(t *testing.T) {
 				Password:      mockPassword,
 				SkipTLSVerify: true,
 			}
-			defaults := &MikrotikDefaults{}
+			defaults := &MikrotikDefaults{DefaultComment: "test"}
 			client, err := NewMikrotikClient(config, defaults)
 			if err != nil {
 				t.Fatalf("Failed to create client: %v", err)
@@ -974,7 +1080,7 @@ func TestDoRequest(t *testing.T) {
 				Password:      mockPassword,
 				SkipTLSVerify: true,
 			}
-			defaults := &MikrotikDefaults{}
+			defaults := &MikrotikDefaults{DefaultComment: "test"}
 			client, err := NewMikrotikClient(config, defaults)
 			if err != nil {
 				t.Fatalf("Failed to create client: %v", err)
@@ -1002,6 +1108,155 @@ func TestDoRequest(t *testing.T) {
 				if resp.StatusCode != tc.expectedStatus {
 					t.Errorf("Expected status %d, got %d", tc.expectedStatus, resp.StatusCode)
 				}
+			}
+		})
+	}
+}
+
+// TestMikrotikApiClient_recordsMatch tests the record matching logic
+func TestMikrotikApiClient_recordsMatch(t *testing.T) {
+	client := &MikrotikApiClient{
+		MikrotikDefaults: &MikrotikDefaults{
+			DefaultTTL:     3600,
+			DefaultComment: "external-dns",
+		},
+	}
+
+	tests := []struct {
+		name          string
+		record1       *DNSRecord
+		record2       *DNSRecord
+		expectedMatch bool
+	}{
+		{
+			name: "A records match",
+			record1: &DNSRecord{
+				Name:    "test.example.com",
+				Type:    "A",
+				Address: "192.0.2.1",
+				ID:      "*1",
+			},
+			record2: &DNSRecord{
+				Name:    "test.example.com",
+				Type:    "A",
+				Address: "192.0.2.1",
+				ID:      "*2", // Different ID but same content
+			},
+			expectedMatch: true,
+		},
+		{
+			name: "A records don't match - different address",
+			record1: &DNSRecord{
+				Name:    "test.example.com",
+				Type:    "A",
+				Address: "192.0.2.1",
+				ID:      "*1",
+			},
+			record2: &DNSRecord{
+				Name:    "test.example.com",
+				Type:    "A",
+				Address: "192.0.2.2",
+				ID:      "*1",
+			},
+			expectedMatch: false,
+		},
+		{
+			name: "CNAME records match",
+			record1: &DNSRecord{
+				Name:  "alias.example.com",
+				Type:  "CNAME",
+				CName: "target.example.com",
+				ID:    "*1",
+			},
+			record2: &DNSRecord{
+				Name:  "alias.example.com",
+				Type:  "CNAME",
+				CName: "target.example.com",
+				ID:    "*3",
+			},
+			expectedMatch: true,
+		},
+		{
+			name: "MX records match",
+			record1: &DNSRecord{
+				Name:         "example.com",
+				Type:         "MX",
+				MXExchange:   "mail.example.com",
+				MXPreference: "10",
+				ID:           "*1",
+			},
+			record2: &DNSRecord{
+				Name:         "example.com",
+				Type:         "MX",
+				MXExchange:   "mail.example.com",
+				MXPreference: "10",
+				ID:           "*5",
+			},
+			expectedMatch: true,
+		},
+		{
+			name: "MX records don't match - different preference",
+			record1: &DNSRecord{
+				Name:         "example.com",
+				Type:         "MX",
+				MXExchange:   "mail.example.com",
+				MXPreference: "10",
+				ID:           "*1",
+			},
+			record2: &DNSRecord{
+				Name:         "example.com",
+				Type:         "MX",
+				MXExchange:   "mail.example.com",
+				MXPreference: "20",
+				ID:           "*1",
+			},
+			expectedMatch: false,
+		},
+		{
+			name: "SRV records match",
+			record1: &DNSRecord{
+				Name:        "_sip._tcp.example.com",
+				Type:        "SRV",
+				SrvTarget:   "sipserver.example.com",
+				SrvPort:     "5060",
+				SrvPriority: "10",
+				SrvWeight:   "20",
+				ID:          "*1",
+			},
+			record2: &DNSRecord{
+				Name:        "_sip._tcp.example.com",
+				Type:        "SRV",
+				SrvTarget:   "sipserver.example.com",
+				SrvPort:     "5060",
+				SrvPriority: "10",
+				SrvWeight:   "20",
+				ID:          "*4",
+			},
+			expectedMatch: true,
+		},
+		{
+			name: "Different record types don't match",
+			record1: &DNSRecord{
+				Name:    "test.example.com",
+				Type:    "A",
+				Address: "192.0.2.1",
+				ID:      "*1",
+			},
+			record2: &DNSRecord{
+				Name:  "test.example.com",
+				Type:  "CNAME",
+				CName: "target.example.com",
+				ID:    "*1",
+			},
+			expectedMatch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := client.recordsMatch(tt.record1, tt.record2)
+			if result != tt.expectedMatch {
+				t.Errorf("Expected %v, got %v", tt.expectedMatch, result)
 			}
 		})
 	}
