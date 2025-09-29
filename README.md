@@ -27,13 +27,12 @@ For examples of creating DNS records either via CRDs or via Ingress/Service anno
 >
 > Thus far, we know for sure `7.16` works and `7.12` does not.
 
-## 🚫 Limitations
 
-### Multiple `Targets`
+### ✅ Multiple `Targets` Support
 
-Currently, `DNSEndpoints` with multiple `targets` are **not** supported. No error will be thrown, but only one record will be created with the first target from the list.
+**NEW:** As of this version, `DNSEndpoints` with multiple `targets` are **fully supported**! Each target will be created as a separate DNS record in MikroTik, and they will be automatically aggregated back into a single endpoint when queried.
 
-This means that when creating a `DNSEndpoint` like this, only the first of the two targets will be taken into account (i.e. `192.192.192.192`).
+This means that when creating a `DNSEndpoint` like this, **both** targets will be created as separate A records:
 
 ```yaml
 ---
@@ -49,11 +48,22 @@ spec:
       targets:
         - 192.192.192.192
         - 193.193.193.193
-
 ```
 
-The problem is that the External DNS controller will detect a drift on this and it will continuously attempt to update the DNS record, thus it will constantly send `PUT` requests to your RouterOS instance on every reconciliation loop.
+**Benefits:**
+- True load balancing with multiple IP addresses
+- No more drift detection issues with ExternalDNS controller
+- Backward compatibility with existing single-target setups
+- Intelligent record grouping and management
 
+**How it works:**
+- Multiple targets are automatically split into separate MikroTik DNS records
+- Records are grouped using internal metadata for proper management
+- When queried, multiple records are aggregated back into a single endpoint
+- All CRUD operations (create, update, delete) handle multiple records intelligently
+
+
+## 🚫 Limitations
 ### Regexp Records
 
 While the webhook can read records with a regexp defined, external-dns itself cannot manage them. This means that they either need to be excluded via `domainFilters` or `excludeDomains` so that external-dns will not try to assume ownership over them.
