@@ -30,7 +30,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /app/external-dns-provider-mikrotik /external-dns-provider-mikrotik
 
 # Use non-root user for security
-USER nonroot:nonroot
+USER 8675:8675
 
 # Expose the default port
 EXPOSE 8080
