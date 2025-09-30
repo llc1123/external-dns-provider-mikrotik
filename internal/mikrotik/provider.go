@@ -98,14 +98,55 @@ func (p *MikrotikProvider) ApplyChanges(ctx context.Context, changes *plan.Chang
 	}
 
 	// Handle Updates with smart differential updates
-	if len(changes.UpdateOld) > 0 && len(changes.UpdateNew) > 0 {
-		for i := 0; i < len(changes.UpdateOld) && i < len(changes.UpdateNew); i++ {
-			oldEndpoint := changes.UpdateOld[i]
-			newEndpoint := changes.UpdateNew[i]
+	if len(changes.UpdateOld) > 0 || len(changes.UpdateNew) > 0 {
+		// Create maps for matching old and new endpoints by DNS name and record type
+		oldEndpoints := make(map[string]*endpoint.Endpoint)
+		newEndpoints := make(map[string]*endpoint.Endpoint)
 
-			if err := p.smartUpdateEndpoint(oldEndpoint, newEndpoint); err != nil {
-				log.Errorf("Failed to update DNS records for endpoint %s: %v", newEndpoint.DNSName, err)
-				return err
+		// Build map of old endpoints
+		for _, oldEndpoint := range changes.UpdateOld {
+			key := fmt.Sprintf("%s:%s", oldEndpoint.DNSName, oldEndpoint.RecordType)
+			oldEndpoints[key] = oldEndpoint
+		}
+
+		// Build map of new endpoints
+		for _, newEndpoint := range changes.UpdateNew {
+			key := fmt.Sprintf("%s:%s", newEndpoint.DNSName, newEndpoint.RecordType)
+			newEndpoints[key] = newEndpoint
+		}
+
+		// Find matched pairs for smart updates
+		processedKeys := make(map[string]bool)
+
+		// Process matched pairs with smart updates
+		for key, oldEndpoint := range oldEndpoints {
+			if newEndpoint, exists := newEndpoints[key]; exists {
+				if err := p.smartUpdateEndpoint(oldEndpoint, newEndpoint); err != nil {
+					log.Errorf("Failed to update DNS records for endpoint %s: %v", newEndpoint.DNSName, err)
+					return err
+				}
+				processedKeys[key] = true
+			}
+		}
+
+		// Delete unmatched old endpoints
+		for key, oldEndpoint := range oldEndpoints {
+			if !processedKeys[key] {
+				if err := p.client.DeleteDNSRecords(oldEndpoint); err != nil {
+					log.Errorf("Failed to delete unmatched old DNS records for endpoint %s: %v", oldEndpoint.DNSName, err)
+					return err
+				}
+			}
+		}
+
+		// Create unmatched new endpoints
+		for key, newEndpoint := range newEndpoints {
+			if !processedKeys[key] {
+				_, err := p.client.CreateDNSRecords(newEndpoint)
+				if err != nil {
+					log.Errorf("Failed to create unmatched new DNS records for endpoint %s: %v", newEndpoint.DNSName, err)
+					return err
+				}
 			}
 		}
 	}
@@ -126,50 +167,31 @@ func (p *MikrotikProvider) ApplyChanges(ctx context.Context, changes *plan.Chang
 func (p *MikrotikProvider) smartUpdateEndpoint(oldEndpoint, newEndpoint *endpoint.Endpoint) error {
 	log.Debugf("Smart update: comparing old endpoint %s with new endpoint", oldEndpoint.DNSName)
 
-	// Get current records for this endpoint using name filtering
-	allRecords, err := p.client.GetDNSRecordsByName(oldEndpoint.DNSName)
-	if err != nil {
-		return fmt.Errorf("failed to get current DNS records: %w", err)
+	// Build maps of old and new targets
+	oldTargets := make(map[string]bool) // target -> exists
+	for _, target := range oldEndpoint.Targets {
+		oldTargets[target] = true
 	}
 
-	// Filter records by type (records are already filtered by name and comment)
-	var currentRecords []DNSRecord
-	for _, record := range allRecords {
-		if record.Type == oldEndpoint.RecordType {
-			currentRecords = append(currentRecords, record)
-		}
-	}
-
-	log.Debugf("Found %d current records for endpoint %s", len(currentRecords), oldEndpoint.DNSName)
-
-	// Build maps of current and desired targets
-	currentTargets := make(map[string]DNSRecord) // target -> record
-	for _, record := range currentRecords {
-		target := getRecordTarget(&record)
-		if target != "" {
-			currentTargets[target] = record
-		}
-	}
-
-	desiredTargets := make(map[string]bool) // target -> exists
+	newTargets := make(map[string]bool) // target -> exists
 	for _, target := range newEndpoint.Targets {
-		desiredTargets[target] = true
+		newTargets[target] = true
 	}
 
-	log.Debugf("Current targets: %v, Desired targets: %v", getStringKeys(currentTargets), getBoolMapKeys(desiredTargets))
+	log.Debugf("Old targets: %v, New targets: %v", oldEndpoint.Targets, newEndpoint.Targets)
 
-	// Find targets to delete (in current but not in desired)
+	// Find targets to delete (in old but not in new)
 	var toDelete []string
-	for target := range currentTargets {
-		if !desiredTargets[target] {
+	for target := range oldTargets {
+		if !newTargets[target] {
 			toDelete = append(toDelete, target)
 		}
 	}
 
-	// Find targets to add (in desired but not in current)
+	// Find targets to add (in new but not in old)
 	var toAdd []string
-	for target := range desiredTargets {
-		if _, exists := currentTargets[target]; !exists {
+	for target := range newTargets {
+		if !oldTargets[target] {
 			toAdd = append(toAdd, target)
 		}
 	}
@@ -210,24 +232,6 @@ func (p *MikrotikProvider) smartUpdateEndpoint(oldEndpoint, newEndpoint *endpoin
 	}
 
 	return nil
-}
-
-// Helper function to get map keys
-func getStringKeys(m map[string]DNSRecord) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
-// Helper function to get bool map keys
-func getBoolMapKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 // GetDomainFilter returns the domain filter for the provider.
