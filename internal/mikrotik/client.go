@@ -167,7 +167,7 @@ func (c *MikrotikApiClient) encodeQueryParams(params url.Values) string {
 				parts = append(parts, fmt.Sprintf("%s=%s", url.QueryEscape(key), value))
 			} else {
 				// For other parameters, use standard encoding
-				parts = append(parts, fmt.Sprintf("%s=%s", url.QueryEscape(key), url.QueryEscape(value)))
+				parts = append(parts, fmt.Sprintf("%s=%s", url.QueryEscape(key), strings.ReplaceAll(url.QueryEscape(value), "+", "%20")))
 			}
 		}
 	}
