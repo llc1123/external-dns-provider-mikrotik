@@ -97,7 +97,7 @@ See mirceanton/external-dns-provider-mikrotik#166
 | Environment Variable        | Description                                                                        | Default Value |
 |-----------------------------|------------------------------------------------------------------------------------|---------------|
 | `MIKROTIK_DEFAULT_TTL`      | Default TTL value to be set for DNS records with no specified TTL.                 | `3600`        |
-| `MIKROTIK_DEFAULT_Comment`  | Default Comment value to be set for DNS records with no specified Comment.         | N/A           |
+| `MIKROTIK_DEFAULT_Comment`  | Default Comment value to be set for DNS records with no specified Comment.         | `Managed By ExternalDNS`           |
 
 ### Webhook Server Configuration
 
