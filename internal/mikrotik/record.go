@@ -140,7 +140,7 @@ func newSingleDNSRecord(endpoint *endpoint.Endpoint) (*DNSRecord, error) {
 			return nil, err
 		}
 		record.CName = endpoint.Targets[0]
-		log.Debugf("CNAME set to: %s", record.Address)
+		log.Debugf("CNAME set to: %s", record.CName)
 
 	case "TXT":
 		if err := validateTXT(endpoint.Targets[0]); err != nil {

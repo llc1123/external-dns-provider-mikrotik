@@ -33,6 +33,6 @@ COPY --from=builder /app/external-dns-provider-mikrotik /external-dns-provider-m
 USER 8675:8675
 
 # Expose the default port
-EXPOSE 8080
+EXPOSE 8080 8888
 
 ENTRYPOINT ["/external-dns-provider-mikrotik"]
