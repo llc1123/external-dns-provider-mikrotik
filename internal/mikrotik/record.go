@@ -650,6 +650,15 @@ func aggregateRecordGroupToEndpoint(records []*DNSRecord) (*endpoint.Endpoint, e
 		return nil, fmt.Errorf("failed to convert template record: %w", err)
 	}
 
+	// Remove Default Comment and Disabled from ProviderSpecific
+	var filteredProviderSpecific []endpoint.ProviderSpecificProperty
+	for _, prop := range baseEndpoint.ProviderSpecific {
+		if prop.Name != "comment" && prop.Name != "disabled" {
+			filteredProviderSpecific = append(filteredProviderSpecific, prop)
+		}
+	}
+	baseEndpoint.ProviderSpecific = filteredProviderSpecific
+
 	// Aggregate all targets
 	var targets []string
 	for _, record := range records {

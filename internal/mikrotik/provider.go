@@ -370,6 +370,10 @@ func (p *MikrotikProvider) changes(changes *plan.Changes) *plan.Changes {
 	}
 
 	log.Debugf("Initial changes - Create: %d, Delete: %d, UpdateOld: %d, UpdateNew: %d", len(changes.Create), len(changes.Delete), len(changes.UpdateOld), len(changes.UpdateNew))
+	log.Debugf("Create: %v", changes.Create)
+	log.Debugf("Delete: %v", changes.Delete)
+	log.Debugf("UpdateOld: %v", changes.UpdateOld)
+	log.Debugf("UpdateNew: %v", changes.UpdateNew)
 
 	// Process Create changes
 	for _, create := range changes.Create {
